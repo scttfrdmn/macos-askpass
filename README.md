@@ -25,15 +25,18 @@ sudo: no tty present and no askpass program specified
 
 ### Installation
 
-#### Option 1: One-line install (recommended)
+#### Option 1: Homebrew (recommended)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scttfrdmn/macos-askpass/main/install.sh | bash
+# Add the tap
+brew tap scttfrdmn/macos-askpass
+
+# Install askpass
+brew install macos-askpass
 ```
 
-#### Option 2: Homebrew (coming soon)
+#### Option 2: One-line install
 ```bash
-brew tap scttfrdmn/tap
-brew install macos-askpass
+curl -fsSL https://raw.githubusercontent.com/scttfrdmn/macos-askpass/main/install.sh | bash
 ```
 
 #### Option 3: Manual install

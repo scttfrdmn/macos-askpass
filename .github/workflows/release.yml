@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up environment
+      run: |
+        echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+        echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+    
+    - name: Validate version
+      run: |
+        # Ensure version in script matches tag
+        SCRIPT_VERSION=$(grep 'readonly ASKPASS_VERSION=' bin/askpass | cut -d'"' -f2)
+        if [ "$SCRIPT_VERSION" != "$VERSION" ]; then
+          echo "❌ Version mismatch: script has $SCRIPT_VERSION, tag is $VERSION"
+          exit 1
+        fi
+        echo "✅ Version validation passed: $VERSION"
+    
+    - name: Run tests
+      run: |
+        # Run linting and basic tests
+        make lint
+        make test
+        echo "✅ All tests passed"
+    
+    - name: Build release package
+      run: |
+        make build
+        echo "✅ Release package built"
+    
+    - name: Generate checksums
+      run: |
+        cd dist
+        shasum -a 256 *.tar.gz > checksums.txt
+        echo "✅ Checksums generated"
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: "macOS ASKPASS ${{ env.VERSION }}"
+        body: |
+          ## 🎉 macOS ASKPASS ${{ env.VERSION }}
+          
+          ### 🚀 Installation
+          
+          **Homebrew (recommended):**
+          ```bash
+          brew tap scttfrdmn/macos-askpass
+          brew install macos-askpass
+          ```
+          
+          **One-line install:**
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/scttfrdmn/macos-askpass/main/install.sh | bash
+          ```
+          
+          ### 📦 Assets
+          - `askpass-${{ env.VERSION }}-macos.tar.gz` - Complete package
+          - `checksums.txt` - SHA256 checksums
+          
+          ### 🔐 Features
+          - Multi-source authentication (CI vars, keychain, GUI, terminal)
+          - Native macOS GUI password dialogs with smart detection
+          - Seamless CLI automation for CI/CD pipelines
+          - macOS Keychain integration for secure storage
+          - Zero-dependency bash implementation
+          - Comprehensive security and testing
+          
+          ### 📚 Documentation
+          - [Complete Guide](https://github.com/scttfrdmn/macos-askpass)
+          - [Security Guide](https://github.com/scttfrdmn/macos-askpass/blob/main/docs/SECURITY.md)
+          - [Integration Examples](https://github.com/scttfrdmn/macos-askpass/tree/main/examples)
+        files: |
+          dist/*.tar.gz
+          dist/checksums.txt
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Update Homebrew formula
+      env:
+        HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      run: |
+        # Calculate new SHA256
+        NEW_SHA256=$(shasum -a 256 dist/askpass-${{ env.VERSION }}-macos.tar.gz | cut -d' ' -f1)
+        
+        # Clone homebrew tap repository
+        git clone https://github.com/scttfrdmn/homebrew-macos-askpass.git tap-repo
+        cd tap-repo
+        
+        # Update formula
+        sed -i '' "s|archive/v.*\.tar\.gz|archive/${{ env.TAG_NAME }}.tar.gz|g" macos-askpass.rb
+        sed -i '' "s|sha256 \".*\"|sha256 \"$NEW_SHA256\"|g" macos-askpass.rb
+        
+        # Commit and push changes
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add macos-askpass.rb
+        git commit -m "feat: update formula to ${{ env.VERSION }}
+
+        🍺 Updated macOS ASKPASS Homebrew formula
+
+        ✨ Changes:
+        - Version: ${{ env.VERSION }}
+        - SHA256: $NEW_SHA256
+        - Source: https://github.com/scttfrdmn/macos-askpass/archive/${{ env.TAG_NAME }}.tar.gz
+
+        🚀 Installation:
+          brew tap scttfrdmn/macos-askpass
+          brew install macos-askpass
+
+        Automated update via GitHub Actions 🤖"
+        
+        git remote set-url origin https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/scttfrdmn/homebrew-macos-askpass.git
+        git push origin main
+        
+        echo "✅ Homebrew formula updated successfully"

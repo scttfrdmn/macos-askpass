@@ -91,15 +91,13 @@ show_gui_dialog() {
     
     local title="sudo Password Required"
     local prompt="Enter your password to allow sudo access:"
-    local icon_path="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/LockedIcon.icns"
-    
-    # Try to show the dialog with proper styling
+    # Try to show the dialog with proper styling (without icon to avoid path issues)
     local password
     password=$(osascript -e "
         try
             set theResult to display dialog \"$prompt\" default answer \"\" ¬
                 with title \"$title\" ¬
-                with icon file \"$icon_path\" ¬
+                with icon caution ¬
                 with hidden answer ¬
                 buttons {\"Cancel\", \"OK\"} ¬
                 default button \"OK\"

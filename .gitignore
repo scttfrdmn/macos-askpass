@@ -1,0 +1,46 @@
+# macOS ASKPASS .gitignore
+
+# Build artifacts
+build/
+dist/
+*.tar.gz
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Local configuration (sensitive)
+.env
+.env.local
+local-config.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test artifacts
+coverage.out
+coverage.html
+test-results/
+
+# Homebrew formula generation
+Formula/*.rb.bak
+
+# Log files
+*.log
+
+# Package manager
+node_modules/
+vendor/

@@ -1,0 +1,240 @@
+# Makefile Integration Examples for macOS ASKPASS
+# Copy these examples into your project's Makefile
+
+# =============================================================================
+# Basic ASKPASS Integration
+# =============================================================================
+
+# Ensure ASKPASS is available and configured
+setup-askpass:
+	@echo "🔧 Setting up ASKPASS..."
+	@command -v askpass >/dev/null || { \
+		echo "📦 Installing ASKPASS..."; \
+		curl -fsSL https://raw.githubusercontent.com/scttfrdmn/macos-askpass/main/install.sh | bash; \
+	}
+	@echo "✅ ASKPASS ready: $$(which askpass)"
+
+# Test ASKPASS functionality
+test-askpass:
+	@echo "🧪 Testing ASKPASS functionality..."
+	@askpass test
+
+# =============================================================================
+# Environment Setup Patterns
+# =============================================================================
+
+# Set ASKPASS environment if not already set
+ensure-askpass-env:
+	@if [ -z "$${SUDO_ASKPASS:-}" ]; then \
+		export SUDO_ASKPASS=$$(which askpass); \
+		echo "🔧 Set SUDO_ASKPASS=$$SUDO_ASKPASS"; \
+	else \
+		echo "✅ SUDO_ASKPASS already set: $$SUDO_ASKPASS"; \
+	fi
+
+# Configure ASKPASS for local development
+setup-local-askpass: setup-askpass
+	@echo "🔧 Configuring ASKPASS for local development..."
+	@askpass setup
+	@echo "export SUDO_ASKPASS=$$(which askpass)" >> ~/.askpass_env
+	@echo "✅ Local ASKPASS configured"
+	@echo "   Run: source ~/.askpass_env"
+
+# =============================================================================
+# Testing Patterns
+# =============================================================================
+
+# Unit tests (no root required)
+test-unit:
+	@echo "🧪 Running unit tests..."
+	go test ./internal/...
+
+# Integration tests requiring root privileges
+test-integration: setup-askpass
+	@echo "🔧 Running integration tests with ASKPASS..."
+	@if [ -z "$${SUDO_ASKPASS:-}" ]; then \
+		export SUDO_ASKPASS=$$(which askpass); \
+	fi
+	@sudo -A go test ./test/integration/...
+
+# Complete test suite with ASKPASS
+test-all: test-unit test-integration
+	@echo "✅ All tests completed"
+
+# CI-friendly test target
+test-ci: setup-askpass
+	@echo "🚀 Running CI tests with ASKPASS..."
+	@if [ -z "$${CI_SUDO_PASSWORD:-}" ] && [ -z "$${SUDO_PASSWORD:-}" ]; then \
+		echo "❌ No password configured for CI"; \
+		echo "   Set CI_SUDO_PASSWORD or SUDO_PASSWORD environment variable"; \
+		exit 1; \
+	fi
+	@export SUDO_ASKPASS=$$(which askpass)
+	@askpass test
+	@sudo -A make integration-test-commands
+
+# =============================================================================
+# System Configuration Examples
+# =============================================================================
+
+# Network configuration requiring root
+setup-network: setup-askpass ensure-askpass-env
+	@echo "🌐 Configuring network interfaces..."
+	@sudo -A ifconfig bridge100 create || echo "Bridge already exists"
+	@sudo -A ifconfig bridge100 192.168.100.1 netmask 255.255.255.0
+	@sudo -A ifconfig bridge100 up
+
+# Install system dependencies
+install-system-deps: setup-askpass ensure-askpass-env
+	@echo "📦 Installing system dependencies..."
+	@sudo -A installer -pkg /path/to/package.pkg -target /
+	@sudo -A systemsetup -setremotelogin on
+
+# Start system services
+start-services: setup-askpass ensure-askpass-env
+	@echo "🚀 Starting system services..."
+	@sudo -A launchctl load /Library/LaunchDaemons/myservice.plist
+	@sudo -A launchctl start com.company.myservice
+
+# =============================================================================
+# Cleanup Patterns
+# =============================================================================
+
+# Cleanup network configuration
+cleanup-network: setup-askpass ensure-askpass-env
+	@echo "🧹 Cleaning up network configuration..."
+	@sudo -A ifconfig bridge100 down || true
+	@sudo -A ifconfig bridge100 destroy || true
+
+# Stop and unload services
+cleanup-services: setup-askpass ensure-askpass-env
+	@echo "🧹 Cleaning up services..."
+	@sudo -A launchctl stop com.company.myservice || true
+	@sudo -A launchctl unload /Library/LaunchDaemons/myservice.plist || true
+
+# Complete cleanup
+cleanup-all: cleanup-services cleanup-network
+	@echo "✅ Cleanup completed"
+
+# =============================================================================
+# Development Workflow Patterns
+# =============================================================================
+
+# Development setup
+dev-setup: setup-askpass setup-local-askpass
+	@echo "🚀 Development environment ready"
+	@echo "   Use: sudo -A <command> for automated sudo"
+
+# Quick development test cycle
+dev-test: ensure-askpass-env
+	@echo "⚡ Quick development test..."
+	@sudo -A echo "ASKPASS working!"
+	@make test-unit
+
+# Full development cycle
+dev-full: dev-setup test-all
+	@echo "✅ Full development cycle completed"
+
+# =============================================================================
+# Error Handling Patterns
+# =============================================================================
+
+# Safe sudo execution with error handling
+safe-sudo-cmd = \
+	if [ -z "$${SUDO_ASKPASS:-}" ]; then \
+		echo "❌ SUDO_ASKPASS not set. Run 'make setup-askpass' first"; \
+		exit 1; \
+	fi; \
+	if ! sudo -A $(1); then \
+		echo "❌ Command failed: $(1)"; \
+		exit 1; \
+	fi
+
+# Example usage of safe sudo
+example-safe-network:
+	@$(call safe-sudo-cmd,ifconfig bridge100 create)
+	@$(call safe-sudo-cmd,ifconfig bridge100 192.168.100.1/24)
+
+# =============================================================================
+# Conditional ASKPASS Usage
+# =============================================================================
+
+# Use ASKPASS only if available, fallback to regular sudo
+conditional-sudo:
+	@if command -v askpass >/dev/null 2>&1 && [ -n "$${SUDO_ASKPASS:-$$(which askpass)}" ]; then \
+		echo "🔧 Using ASKPASS for sudo"; \
+		export SUDO_ASKPASS=$${SUDO_ASKPASS:-$$(which askpass)}; \
+		sudo -A systemsetup -getremotelogin; \
+	else \
+		echo "⚠️ ASKPASS not available, using interactive sudo"; \
+		sudo systemsetup -getremotelogin; \
+	fi
+
+# =============================================================================
+# Documentation Targets
+# =============================================================================
+
+# Show ASKPASS configuration
+show-askpass-config: setup-askpass
+	@echo "📋 ASKPASS Configuration:"
+	@askpass config
+
+# Help target with ASKPASS information
+help-askpass:
+	@echo "🔐 ASKPASS Integration Help"
+	@echo "=========================="
+	@echo ""
+	@echo "Setup:"
+	@echo "  make setup-askpass     Install and configure ASKPASS"
+	@echo "  make test-askpass      Test ASKPASS functionality"
+	@echo "  make show-askpass-config Show current configuration"
+	@echo ""
+	@echo "Testing:"
+	@echo "  make test-integration  Run integration tests with ASKPASS"
+	@echo "  make test-ci          Run CI-compatible tests"
+	@echo "  make test-all         Run all tests"
+	@echo ""
+	@echo "Environment Variables:"
+	@echo "  SUDO_ASKPASS          Path to askpass program"
+	@echo "  CI_SUDO_PASSWORD      Password for CI/CD (highest priority)"
+	@echo "  SUDO_PASSWORD         Password for local development"
+	@echo "  ASKPASS_DEBUG         Enable debug logging (set to 1)"
+
+# =============================================================================
+# Example Project Integration
+# =============================================================================
+
+# Real-world example: Network testing project
+network-project-setup: setup-askpass
+	@echo "🌐 Setting up network testing environment..."
+	@export SUDO_ASKPASS=$$(which askpass)
+	@sudo -A pfctl -e || true
+	@sudo -A ifconfig bridge200 create || echo "Bridge exists"
+	@sudo -A ifconfig bridge200 inet 192.168.200.1/24
+	@sudo -A route add -net 192.168.200.0/24 192.168.200.1 || true
+
+network-project-test: network-project-setup
+	@echo "🧪 Running network tests..."
+	@sudo -A ./test-network-config.sh
+	@sudo -A ping -c 3 192.168.200.1
+
+network-project-cleanup:
+	@echo "🧹 Cleaning up network testing..."
+	@export SUDO_ASKPASS=$$(which askpass)
+	@sudo -A route delete -net 192.168.200.0/24 || true
+	@sudo -A ifconfig bridge200 destroy || true
+
+# Combined target for CI
+network-project-ci: network-project-test network-project-cleanup
+
+# =============================================================================
+# Tips for Integration:
+#
+# 1. Always call 'setup-askpass' as a dependency for targets requiring sudo
+# 2. Use 'ensure-askpass-env' to set SUDO_ASKPASS if not already set
+# 3. Include cleanup targets that run even if main targets fail
+# 4. Test both local development and CI scenarios
+# 5. Use conditional logic to handle environments without ASKPASS
+# 6. Always validate environment before running sudo commands
+# 7. Include help targets to document ASKPASS usage
+# =============================================================================

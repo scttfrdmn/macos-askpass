@@ -1,0 +1,545 @@
+#!/bin/bash
+# macOS ASKPASS - Secure sudo authentication for CI/CD and automation
+# Version: 1.0.0
+# https://github.com/scttfrdmn/macos-askpass
+
+set -euo pipefail
+
+# Configuration
+readonly ASKPASS_VERSION="1.0.0"
+readonly KEYCHAIN_SERVICE="macos-askpass-sudo"
+readonly CONFIG_DIR="${HOME}/.config/macos-askpass"
+readonly CONFIG_FILE="${CONFIG_DIR}/config"
+
+# Colors for output (only when not used as ASKPASS)
+if [[ "${0##*/}" == "askpass" && $# -gt 0 ]]; then
+    readonly RED='\033[0;31m'
+    readonly GREEN='\033[0;32m'
+    readonly YELLOW='\033[1;33m'
+    readonly BLUE='\033[0;34m'
+    readonly NC='\033[0m' # No Color
+else
+    readonly RED=''
+    readonly GREEN=''
+    readonly YELLOW=''
+    readonly BLUE=''
+    readonly NC=''
+fi
+
+# Logging functions (only when not used as ASKPASS)
+log_info() {
+    if [[ "${0##*/}" == "askpass" && $# -gt 0 ]]; then
+        echo -e "${BLUE}ℹ️  $1${NC}" >&2
+    fi
+}
+
+log_success() {
+    if [[ "${0##*/}" == "askpass" && $# -gt 0 ]]; then
+        echo -e "${GREEN}✅ $1${NC}" >&2
+    fi
+}
+
+log_warning() {
+    if [[ "${0##*/}" == "askpass" && $# -gt 0 ]]; then
+        echo -e "${YELLOW}⚠️  $1${NC}" >&2
+    fi
+}
+
+log_error() {
+    if [[ "${0##*/}" == "askpass" && $# -gt 0 ]]; then
+        echo -e "${RED}❌ $1${NC}" >&2
+    fi
+}
+
+# Debug logging (controlled by ASKPASS_DEBUG)
+debug_log() {
+    if [[ -n "${ASKPASS_DEBUG:-}" ]]; then
+        echo "ASKPASS DEBUG: $1" >&2
+    fi
+}
+
+# Function to check if GUI is available
+is_gui_available() {
+    # Check if we're in a GUI environment
+    if [[ -n "${DISPLAY:-}" ]] || [[ -n "${SSH_CONNECTION:-}" ]]; then
+        return 1  # Remote session, no GUI
+    fi
+    
+    # Check if osascript is available (should be on all macOS systems)
+    if ! command -v osascript >/dev/null 2>&1; then
+        return 1
+    fi
+    
+    # Check if we're running in Terminal or similar interactive environment
+    # and not in a pure automation context
+    if [[ "${TERM:-}" == "dumb" ]] || [[ -n "${CI:-}" ]] || [[ -n "${GITHUB_ACTIONS:-}" ]] || [[ -n "${JENKINS_URL:-}" ]]; then
+        return 1  # Automation environment, no GUI
+    fi
+    
+    # Check if we can actually display dialogs (system allows GUI)
+    if ! osascript -e 'return 1' >/dev/null 2>&1; then
+        return 1  # System doesn't allow AppleScript/GUI
+    fi
+    
+    debug_log "GUI environment detected"
+    return 0
+}
+
+# Function to show macOS GUI password dialog
+show_gui_dialog() {
+    debug_log "Displaying macOS password dialog"
+    
+    local title="sudo Password Required"
+    local prompt="Enter your password to allow sudo access:"
+    local icon_path="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/LockedIcon.icns"
+    
+    # Try to show the dialog with proper styling
+    local password
+    password=$(osascript -e "
+        try
+            set theResult to display dialog \"$prompt\" default answer \"\" ¬
+                with title \"$title\" ¬
+                with icon file \"$icon_path\" ¬
+                with hidden answer ¬
+                buttons {\"Cancel\", \"OK\"} ¬
+                default button \"OK\"
+            
+            if button returned of theResult is \"OK\" then
+                return text returned of theResult
+            else
+                error \"User cancelled\"
+            end if
+        on error errMsg
+            return \"\"
+        end try
+    " 2>/dev/null)
+    
+    if [[ -n "$password" ]]; then
+        debug_log "Password obtained from GUI dialog"
+        echo "$password"
+        return 0
+    else
+        debug_log "GUI dialog was cancelled or failed"
+        return 1
+    fi
+}
+
+# Function to safely retrieve password from multiple sources
+get_password() {
+    local password=""
+    
+    debug_log "Attempting password retrieval..."
+    
+    # Priority 1: CI_SUDO_PASSWORD environment variable (for CI/CD)
+    if [[ -n "${CI_SUDO_PASSWORD:-}" ]]; then
+        debug_log "Using CI_SUDO_PASSWORD environment variable"
+        echo "${CI_SUDO_PASSWORD}"
+        return 0
+    fi
+    
+    # Priority 2: SUDO_PASSWORD environment variable (local development)
+    if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+        debug_log "Using SUDO_PASSWORD environment variable"
+        echo "${SUDO_PASSWORD}"
+        return 0
+    fi
+    
+    # Priority 3: macOS Keychain (for persistent local storage)
+    if command -v security >/dev/null 2>&1; then
+        debug_log "Attempting keychain retrieval"
+        if password=$(security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w 2>/dev/null); then
+            debug_log "Retrieved password from keychain"
+            echo "$password"
+            return 0
+        fi
+    fi
+    
+    # Priority 4: Configuration file (if it exists and is secure)
+    if [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]]; then
+        debug_log "Checking configuration file"
+        # Verify file permissions (should be 600)
+        local file_perms
+        file_perms=$(stat -f "%Lp" "$CONFIG_FILE")
+        if [[ "$file_perms" == "600" ]]; then
+            if password=$(grep -E "^password=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2-); then
+                debug_log "Retrieved password from configuration file"
+                echo "$password"
+                return 0
+            fi
+        else
+            debug_log "Configuration file has insecure permissions: $file_perms"
+        fi
+    fi
+    
+    # Priority 5: macOS GUI dialog (if GUI available and interactive)
+    if is_gui_available && [[ "${ASKPASS_FORCE_CLI:-}" != "1" ]]; then
+        debug_log "Attempting GUI dialog"
+        if password=$(show_gui_dialog); then
+            debug_log "Retrieved password from GUI dialog"
+            echo "$password"
+            return 0
+        else
+            debug_log "GUI dialog cancelled or failed"
+        fi
+    fi
+    
+    # Priority 6: Terminal interactive fallback (if TTY available)
+    if [[ -t 0 ]]; then
+        debug_log "Falling back to terminal interactive password prompt"
+        echo "ASKPASS: No stored password found. Please enter sudo password:" >&2
+        read -s password
+        echo "$password"
+        return 0
+    fi
+    
+    # No password source available
+    debug_log "No password source available"
+    echo ""
+    return 1
+}
+
+# Function to store password in keychain
+store_password_keychain() {
+    local password="$1"
+    
+    log_info "Storing password in macOS Keychain..."
+    
+    # Add or update keychain entry
+    security add-generic-password \
+        -a "$USER" \
+        -s "$KEYCHAIN_SERVICE" \
+        -T "$(realpath "$0")" \
+        -T "/usr/bin/sudo" \
+        -w "$password" \
+        -U 2>/dev/null || {
+        log_error "Failed to store password in keychain"
+        return 1
+    }
+    
+    log_success "Password stored in keychain (service: $KEYCHAIN_SERVICE)"
+    return 0
+}
+
+# Function to remove password from keychain
+remove_password_keychain() {
+    log_info "Removing password from keychain..."
+    
+    if security delete-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" 2>/dev/null; then
+        log_success "Password removed from keychain"
+    else
+        log_warning "No password found in keychain or removal failed"
+    fi
+}
+
+# Function to test ASKPASS functionality
+test_askpass() {
+    log_info "Testing ASKPASS functionality..."
+    
+    # Test 1: Password retrieval
+    log_info "Test 1: Testing password retrieval..."
+    if password=$(get_password); then
+        if [[ -n "$password" ]]; then
+            log_success "Password retrieval successful"
+        else
+            log_warning "Password retrieval returned empty result"
+            return 1
+        fi
+    else
+        log_error "Password retrieval failed"
+        return 1
+    fi
+    
+    # Test 2: sudo with ASKPASS
+    log_info "Test 2: Testing sudo with ASKPASS..."
+    export SUDO_ASKPASS="$(realpath "$0")"
+    
+    if timeout 10s sudo -A true 2>/dev/null; then
+        log_success "sudo with ASKPASS works correctly"
+    else
+        log_warning "sudo with ASKPASS failed - check password or permissions"
+        return 1
+    fi
+    
+    log_success "All ASKPASS tests passed!"
+    return 0
+}
+
+# Function to show version information
+show_version() {
+    echo "macOS ASKPASS v${ASKPASS_VERSION}"
+    echo "Secure sudo authentication for CI/CD and automation"
+    echo "https://github.com/scttfrdmn/macos-askpass"
+}
+
+# Function to show usage information
+show_usage() {
+    cat << EOF
+macOS ASKPASS v${ASKPASS_VERSION} - Secure sudo authentication for CI/CD and automation
+
+USAGE:
+    askpass [COMMAND]
+
+COMMANDS:
+    (no args)       Output password for sudo (ASKPASS mode)
+    test           Test ASKPASS functionality
+    setup          Interactive setup and configuration
+    store          Store password in keychain (interactive)
+    remove         Remove stored password from keychain
+    config         Show current configuration
+    version        Show version information
+    help           Show this help message
+
+ENVIRONMENT VARIABLES:
+    CI_SUDO_PASSWORD    Password for CI/CD environments (highest priority)
+    SUDO_PASSWORD       Password for local development
+    ASKPASS_DEBUG       Enable debug logging (set to any value)
+    ASKPASS_FORCE_CLI   Force CLI mode, disable GUI dialogs (set to 1)
+    SUDO_ASKPASS        Path to this script (set automatically)
+
+EXAMPLES:
+    # Set up ASKPASS for local development
+    askpass setup
+    
+    # Test ASKPASS functionality
+    askpass test
+    
+    # Use as ASKPASS program
+    export SUDO_ASKPASS="\$(which askpass)"
+    sudo -A echo "Hello, world!"
+    
+    # Use in CI/CD
+    export CI_SUDO_PASSWORD="\${{ secrets.SUDO_PASSWORD }}"
+    export SUDO_ASKPASS="\$(which askpass)"
+    sudo -A make test
+    
+    # Force CLI mode (disable GUI dialogs)
+    export ASKPASS_FORCE_CLI=1
+    sudo -A echo "CLI mode only"
+    
+    # Test GUI dialog (interactive environments)
+    unset CI_SUDO_PASSWORD SUDO_PASSWORD
+    sudo -A echo "Shows GUI password dialog"
+
+For more information: https://github.com/scttfrdmn/macos-askpass
+EOF
+}
+
+# Function to show current configuration
+show_config() {
+    echo "macOS ASKPASS Configuration"
+    echo "=========================="
+    echo
+    echo "Version: $ASKPASS_VERSION"
+    echo "Script location: $(realpath "$0")"
+    echo "Config directory: $CONFIG_DIR"
+    echo "Keychain service: $KEYCHAIN_SERVICE"
+    echo
+    echo "Environment Variables:"
+    echo "  SUDO_ASKPASS: ${SUDO_ASKPASS:-not set}"
+    echo "  CI_SUDO_PASSWORD: ${CI_SUDO_PASSWORD:+SET (hidden)}"
+    echo "  SUDO_PASSWORD: ${SUDO_PASSWORD:+SET (hidden)}"
+    echo "  ASKPASS_DEBUG: ${ASKPASS_DEBUG:-not set}"
+    echo
+    echo "Password Sources (in priority order):"
+    echo "  1. CI_SUDO_PASSWORD: ${CI_SUDO_PASSWORD:+✅ Available}${CI_SUDO_PASSWORD:-❌ Not set}"
+    echo "  2. SUDO_PASSWORD: ${SUDO_PASSWORD:+✅ Available}${SUDO_PASSWORD:-❌ Not set}"
+    
+    # Check keychain
+    if security find-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" -w >/dev/null 2>&1; then
+        echo "  3. Keychain: ✅ Available"
+    else
+        echo "  3. Keychain: ❌ Not found"
+    fi
+    
+    # Check config file
+    if [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]]; then
+        local file_perms
+        file_perms=$(stat -f "%Lp" "$CONFIG_FILE")
+        if [[ "$file_perms" == "600" ]]; then
+            echo "  4. Config file: ✅ Available (secure)"
+        else
+            echo "  4. Config file: ⚠️ Available (insecure permissions: $file_perms)"
+        fi
+    else
+        echo "  4. Config file: ❌ Not found"
+    fi
+    
+    echo "  5. GUI Dialog: $(if is_gui_available && [[ "${ASKPASS_FORCE_CLI:-}" != "1" ]]; then echo "✅ Available"; else echo "❌ Not available"; fi)"
+    echo "  6. Interactive: ${ASKPASS_INTERACTIVE:-❌ Disabled in ASKPASS mode}"
+    
+    echo
+    echo "GUI Mode:"
+    echo "  Environment: $(if is_gui_available; then echo "✅ GUI Available"; else echo "❌ CLI Only"; fi)"
+    echo "  Force CLI: ${ASKPASS_FORCE_CLI:-❌ Not set (GUI enabled)}"
+}
+
+# Interactive setup function
+interactive_setup() {
+    log_info "macOS ASKPASS Interactive Setup"
+    echo
+    
+    # Create config directory
+    mkdir -p "$CONFIG_DIR"
+    
+    echo "This setup will configure ASKPASS for your environment."
+    echo "Choose your preferred password storage method:"
+    echo
+    echo "1. macOS Keychain (recommended for local development)"
+    echo "2. Environment variables (recommended for CI/CD)"
+    echo "3. Both (maximum flexibility)"
+    echo
+    
+    read -p "Select option [1-3]: " -r choice
+    
+    case "$choice" in
+        1|"")
+            log_info "Setting up macOS Keychain storage..."
+            echo
+            echo "Please enter your sudo password (it will be stored securely in Keychain):"
+            read -s password
+            echo
+            
+            if store_password_keychain "$password"; then
+                echo "export SUDO_ASKPASS=\"$(realpath "$0")\"" > "${CONFIG_DIR}/env.sh"
+                chmod 600 "${CONFIG_DIR}/env.sh"
+                
+                log_success "Keychain setup complete!"
+                echo
+                echo "To use ASKPASS, run:"
+                echo "  source ${CONFIG_DIR}/env.sh"
+                echo "  sudo -A <your-command>"
+            fi
+            ;;
+        2)
+            log_info "Setting up environment variable configuration..."
+            echo
+            
+            cat > "${CONFIG_DIR}/env.sh" << EOF
+#!/bin/bash
+# macOS ASKPASS Environment Configuration
+
+# Set ASKPASS program
+export SUDO_ASKPASS="$(realpath "$0")"
+
+# For local development, set your password:
+# export SUDO_PASSWORD="your_password"
+
+# For CI/CD, use secrets:
+# export CI_SUDO_PASSWORD="\${{ secrets.SUDO_PASSWORD }}"
+
+# Enable debug mode (optional):
+# export ASKPASS_DEBUG=1
+
+echo "✅ ASKPASS environment configured"
+echo "   SUDO_ASKPASS: \$SUDO_ASKPASS"
+EOF
+            chmod 600 "${CONFIG_DIR}/env.sh"
+            
+            log_success "Environment setup complete!"
+            echo
+            echo "To use ASKPASS:"
+            echo "  1. Edit ${CONFIG_DIR}/env.sh to set your password"
+            echo "  2. Run: source ${CONFIG_DIR}/env.sh"
+            echo "  3. Use: sudo -A <your-command>"
+            ;;
+        3)
+            log_info "Setting up both Keychain and environment variables..."
+            echo
+            echo "Please enter your sudo password for keychain storage:"
+            read -s password
+            echo
+            
+            if store_password_keychain "$password"; then
+                cat > "${CONFIG_DIR}/env.sh" << EOF
+#!/bin/bash
+# macOS ASKPASS Environment Configuration
+
+# Set ASKPASS program
+export SUDO_ASKPASS="$(realpath "$0")"
+
+# Password stored in keychain for local development
+# For CI/CD, also set: export CI_SUDO_PASSWORD="\${{ secrets.SUDO_PASSWORD }}"
+
+# Enable debug mode (optional):
+# export ASKPASS_DEBUG=1
+
+echo "✅ ASKPASS environment configured (keychain + environment)"
+echo "   SUDO_ASKPASS: \$SUDO_ASKPASS"
+EOF
+                chmod 600 "${CONFIG_DIR}/env.sh"
+                
+                log_success "Complete setup finished!"
+                echo
+                echo "To use ASKPASS:"
+                echo "  source ${CONFIG_DIR}/env.sh"
+                echo "  sudo -A <your-command>"
+            fi
+            ;;
+        *)
+            log_error "Invalid selection"
+            exit 1
+            ;;
+    esac
+}
+
+# Store password interactively
+store_password() {
+    echo "Enter sudo password to store in keychain:"
+    read -s password
+    echo
+    store_password_keychain "$password"
+}
+
+# Main execution logic
+main() {
+    # Log usage for debugging (only if ASKPASS_DEBUG is set)
+    if [[ -n "${ASKPASS_DEBUG:-}" ]]; then
+        debug_log "Called by $(ps -o comm= $PPID 2>/dev/null || echo "unknown") (PID: ${PPID:-unknown})"
+        debug_log "User: $USER"
+        debug_log "PWD: $PWD"
+        debug_log "Args: $*"
+    fi
+    
+    # If no arguments, act as ASKPASS program (output password)
+    if [[ $# -eq 0 ]]; then
+        if ! get_password; then
+            debug_log "Failed to retrieve password from any source"
+            exit 1
+        fi
+        return 0
+    fi
+    
+    # Handle commands
+    case "${1:-}" in
+        "test")
+            test_askpass
+            ;;
+        "setup")
+            interactive_setup
+            ;;
+        "store")
+            store_password
+            ;;
+        "remove")
+            remove_password_keychain
+            ;;
+        "config")
+            show_config
+            ;;
+        "version")
+            show_version
+            ;;
+        "help"|"-h"|"--help")
+            show_usage
+            ;;
+        *)
+            log_error "Unknown command: $1"
+            echo
+            show_usage
+            exit 1
+            ;;
+    esac
+}
+
+# Execute main function
+main "$@"

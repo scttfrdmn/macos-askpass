@@ -1,0 +1,141 @@
+# GitHub Actions Example: macOS Integration Testing with ASKPASS
+# Place this file in: .github/workflows/integration-test.yml
+
+name: macOS Integration Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+    # Only run integration tests when labeled
+    types: [ opened, synchronize, labeled ]
+
+jobs:
+  # Standard tests that don't require root privileges
+  unit-tests:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        # Install your project dependencies
+        make install-deps
+    
+    - name: Run unit tests
+      run: |
+        make test-unit
+    
+    - name: Run security tests
+      run: |
+        make test-security
+
+  # Integration tests requiring root privileges (using ASKPASS)
+  integration-tests:
+    runs-on: macos-latest
+    needs: unit-tests
+    
+    # Only run on main branch or PRs with 'test-integration' label
+    if: |
+      github.ref == 'refs/heads/main' || 
+      contains(github.event.pull_request.labels.*.name, 'test-integration')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install macOS ASKPASS
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/scttfrdmn/macos-askpass/main/install.sh | bash
+        askpass version
+    
+    - name: Configure ASKPASS environment
+      env:
+        CI_SUDO_PASSWORD: ${{ secrets.MACOS_SUDO_PASSWORD }}
+      run: |
+        # Verify password is configured
+        if [ -z "$CI_SUDO_PASSWORD" ]; then
+          echo "❌ CI_SUDO_PASSWORD secret not configured"
+          echo "   Add MACOS_SUDO_PASSWORD to repository secrets"
+          exit 1
+        fi
+        
+        # Set ASKPASS environment
+        echo "SUDO_ASKPASS=$(which askpass)" >> $GITHUB_ENV
+        
+        # Test ASKPASS functionality
+        askpass test
+    
+    - name: Run integration tests
+      env:
+        CI_SUDO_PASSWORD: ${{ secrets.MACOS_SUDO_PASSWORD }}
+        ASKPASS_DEBUG: 1  # Enable debug logging
+      run: |
+        # Run your integration tests that require sudo
+        sudo -A make integration-test
+        
+        # Examples of sudo commands that now work in CI:
+        # sudo -A systemsetup -getremotelogin
+        # sudo -A pfctl -sr
+        # sudo -A ./network-setup.sh
+      timeout-minutes: 15
+    
+    - name: Cleanup after tests
+      if: always()
+      env:
+        CI_SUDO_PASSWORD: ${{ secrets.MACOS_SUDO_PASSWORD }}
+      run: |
+        # Cleanup any system changes made during testing
+        sudo -A ./cleanup-integration-test.sh || true
+        
+        # Example cleanup commands:
+        # sudo -A pkill -f test_daemon || true
+        # sudo -A ifconfig bridge100 destroy || true
+        # sudo -A launchctl unload /Library/LaunchDaemons/test.plist || true
+
+  # Optional: Security audit
+  security-audit:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install security tools
+      run: |
+        brew install shellcheck
+        # Add other security scanning tools as needed
+    
+    - name: Run security scans
+      run: |
+        # Scan shell scripts for security issues
+        find . -name "*.sh" -exec shellcheck {} \;
+        
+        # Add other security checks as needed
+        make security-scan || true
+
+# Tips for using this workflow:
+#
+# 1. Repository Secrets Setup:
+#    - Go to Settings > Secrets and variables > Actions
+#    - Add secret: MACOS_SUDO_PASSWORD with your test user's password
+#    - Scope the secret to specific environments if needed
+#
+# 2. Label-based Integration Testing:
+#    - Add 'test-integration' label to PRs that need integration testing
+#    - This prevents unnecessary runs on every PR
+#
+# 3. Timeout Protection:
+#    - Integration tests have 15-minute timeout to prevent hanging
+#    - Adjust timeout based on your test requirements
+#
+# 4. Cleanup Strategy:
+#    - Always include cleanup steps with 'if: always()'
+#    - Use '|| true' to prevent cleanup failures from failing the job
+#
+# 5. Debug Mode:
+#    - ASKPASS_DEBUG=1 enables detailed logging
+#    - Remove or set to 0 for production workflows

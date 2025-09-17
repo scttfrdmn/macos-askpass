@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # Configuration
-readonly ASKPASS_VERSION="1.0.1"
+readonly ASKPASS_VERSION="1.0.2"
 readonly KEYCHAIN_SERVICE="macos-askpass-sudo"
 readonly CONFIG_DIR="${HOME}/.config/macos-askpass"
 readonly CONFIG_FILE="${CONFIG_DIR}/config"
@@ -498,45 +498,46 @@ main() {
         debug_log "Args: $*"
     fi
     
-    # If no arguments, act as ASKPASS program (output password)
-    if [[ $# -eq 0 ]]; then
-        if ! get_password; then
-            debug_log "Failed to retrieve password from any source"
-            exit 1
-        fi
-        return 0
-    fi
-    
-    # Handle commands
+    # Handle commands first (when called directly)
     case "${1:-}" in
         "test")
             test_askpass
+            return 0
             ;;
         "setup")
             interactive_setup
+            return 0
             ;;
         "store")
             store_password
+            return 0
             ;;
         "remove")
             remove_password_keychain
+            return 0
             ;;
         "config")
             show_config
+            return 0
             ;;
         "version")
             show_version
+            return 0
             ;;
         "help"|"-h"|"--help")
             show_usage
-            ;;
-        *)
-            log_error "Unknown command: $1"
-            echo
-            show_usage
-            exit 1
+            return 0
             ;;
     esac
+
+    # If called with no arguments OR with any arguments (likely from sudo),
+    # act as ASKPASS program and output password
+    # sudo typically calls askpass with prompts like "Password:" or "Password for user:"
+    if ! get_password; then
+        debug_log "Failed to retrieve password from any source"
+        exit 1
+    fi
+    return 0
 }
 
 # Execute main function
